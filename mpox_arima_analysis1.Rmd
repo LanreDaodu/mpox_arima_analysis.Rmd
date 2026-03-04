@@ -1,0 +1,175 @@
+
+---
+title: "Temporal Dynamics and Predictive Modelling of Mpox in Nigeria (2017–2025)"
+author: "Lanre Peter Daodu et al."
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+  pdf_document: default
+---
+
+# Introduction
+
+This document contains the complete reproducible analytical workflow for modelling Mpox epidemiological time-series data in Nigeria (2017–2025) using ARIMA and ARIMAX models.
+
+# Package Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+library(ISOweek)
+library(forecast)
+library(tseries)
+library(ggplot2)
+library(patchwork)
+library(readxl)
+```
+
+# Data Import
+
+```{r data-import}
+mpox_data <- read_xlsx("Mpox-Data_2017-2025V2.xlsx")
+
+mpox_data <- mpox_data %>%
+  rename(
+    Year = `Year`,
+    EpiWeek = `Epi-Week`,
+    Suspected = `Suspected Cases`,
+    Confirmed = `Confirmed Cases`,
+    Death = `Death`
+  ) %>%
+  mutate(across(c(Suspected, Confirmed, Death), ~replace_na(., 0)))
+```
+
+# Create Weekly Date Index
+
+```{r weekly-date}
+mpox_data <- mpox_data %>%
+  mutate(
+    EpiWeek = as.numeric(EpiWeek),
+    iso_week = sprintf("%02d", EpiWeek),
+    iso_string = paste0(Year, "-W", iso_week, "-1"),
+    WeekStartDate = ISOweek2date(iso_string)
+  ) %>%
+  arrange(WeekStartDate)
+```
+
+# Create Time Series Objects
+
+```{r ts-objects}
+confirmed_ts <- ts(mpox_data$Confirmed, start = c(2017,1), frequency = 52)
+suspected_ts <- ts(mpox_data$Suspected, start = c(2017,1), frequency = 52)
+death_ts     <- ts(mpox_data$Death,     start = c(2017,1), frequency = 52)
+```
+
+# Stationarity Testing
+
+```{r stationarity}
+adf.test(confirmed_ts)
+kpss.test(confirmed_ts)
+
+diff_confirmed <- diff(confirmed_ts)
+adf.test(diff_confirmed)
+kpss.test(diff_confirmed)
+```
+
+# ARIMA Model Estimation
+
+```{r arima-fit}
+auto_confirmed <- auto.arima(confirmed_ts, seasonal = FALSE)
+summary(auto_confirmed)
+checkresiduals(auto_confirmed)
+```
+
+# Forecasting
+
+```{r forecasting}
+forecast_horizon <- 52
+fc_confirmed <- forecast(auto_confirmed, h = forecast_horizon)
+
+autoplot(fc_confirmed) +
+  labs(title="52-Week Forecast of Confirmed Mpox Cases",
+       x="Year", y="Cases")
+```
+
+# Rolling-Origin Cross-Validation
+
+```{r cross-validation}
+set.seed(123)
+
+y <- as.numeric(confirmed_ts)
+n <- length(y)
+initial <- 260
+h <- 1
+
+origins <- seq(initial, n-h)
+errors <- numeric(length(origins))
+
+for (i in seq_along(origins)) {
+  train <- ts(y[1:origins[i]], frequency=52)
+  fit <- auto.arima(train, seasonal=FALSE)
+  pred <- forecast(fit, h=h)$mean[1]
+  errors[i] <- y[origins[i]+h] - pred
+}
+
+MAE  <- mean(abs(errors))
+RMSE <- sqrt(mean(errors^2))
+
+tibble(MAE=MAE, RMSE=RMSE)
+```
+
+# Rainfall Covariate (ARIMAX)
+
+```{r rainfall-import}
+rainfall_data <- read_xlsx("Rainfall_data2017_2025.xlsx")
+colnames(rainfall_data) <- c("Date","rainfall_mm")
+
+rainfall_data$Date <- as.Date(rainfall_data$Date)
+
+rain_weekly <- rainfall_data %>%
+  mutate(WeekStartDate = floor_date(Date,"week")) %>%
+  group_by(WeekStartDate) %>%
+  summarise(rainfall_mm = mean(rainfall_mm, na.rm=TRUE))
+
+mpox_rain <- left_join(mpox_data, rain_weekly, by="WeekStartDate")
+mpox_rain$rainfall_mm[is.na(mpox_rain$rainfall_mm)] <- 0
+
+rain_ts <- ts(mpox_rain$rainfall_mm, start=c(2017,1), frequency=52)
+```
+
+```{r arimax}
+fit_arimax <- auto.arima(confirmed_ts, xreg = rain_ts, seasonal=FALSE)
+summary(fit_arimax)
+
+fc_arimax <- forecast(fit_arimax,
+                      xreg = tail(rain_ts, forecast_horizon),
+                      h = forecast_horizon)
+
+autoplot(fc_arimax) +
+  labs(title="ARIMAX Forecast with Rainfall Covariate")
+```
+
+# Descriptive Statistics
+
+```{r descriptives}
+mpox_summary <- mpox_data %>%
+  group_by(Year) %>%
+  summarise(
+    Total_Suspected = sum(Suspected),
+    Total_Confirmed = sum(Confirmed),
+    Total_Death     = sum(Death),
+    CFR = ifelse(Total_Confirmed==0, NA,
+                 (Total_Death/Total_Confirmed)*100)
+  )
+
+mpox_summary
+```
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
